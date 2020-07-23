@@ -5,11 +5,11 @@
     "size": 380,
     "fp16": true,
     "optimizer": {
-        "batch_size": 12,
+        "batch_size": 8,
         "type": "SGD",
         "momentum": 0.9,
         "weight_decay": 1e-4,
-        "learning_rate": 0.01,
+        "learning_rate": 0.001,
         "nesterov": true,
         "schedule": {
             "type": "poly",
@@ -24,6 +24,7 @@
     },
     "losses": {
         "BinaryCrossentropy": 1
-    }
+    },
+    "pos_th": 0.5
 }
 

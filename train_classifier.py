@@ -1,26 +1,26 @@
 import sys
-sys.path.append("..")
-import pdb
-pdb.set_trace()
 import argparse
 import json
 import os
-from collections import defaultdict
+import pdb
+import time
 
 from torch import topk
-
+import cv2
+from torch.autograd import Variable
 from training.datasets.classifier_dataset import DeepFakeClassifierDataset, collate_function
 from torch.nn.modules.loss import BCEWithLogitsLoss
 from training.tools.config import load_config
 from training.tools.utils import create_optimizer, AverageMeter, read_annotations, Progbar, predict_set, evaluate
 from training.transforms.albu import IsotropicResize
 from training.zoo import classifiers
-
+import warnings
+warnings.filterwarnings("ignore")
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 
-import cv2
+
 
 cv2.ocl.setUseOpenCL(False)
 cv2.setNumThreads(0)
@@ -74,7 +74,7 @@ def main():
     parser = argparse.ArgumentParser("PyTorch Xview Pipeline")
     arg = parser.add_argument
     arg('--config', metavar='CONFIG_FILE',default='configs/b7.json',help='path to configuration file')
-    arg('--train_txt',type=str,default='/data/dongchengbo/VisualSearch/dfdc_dfv2_ff++_timit_withface_val.txt')
+    arg('--train_txt',type=str,default='/data/dongchengbo/VisualSearch/dfdc_dfv2_ff++_timit_withface_train.txt')
     arg('--val_txt', type=str,default='/data/dongchengbo/VisualSearch/dfdc_dfv2_ff++_timit_withface_val.txt')
     arg('--workers', type=int, default=6, help='number of cpu threads to use')
     arg('--gpu', type=str, default='0', help='List of GPUs for parallel training, e.g. 0,1,2,3')
@@ -93,10 +93,12 @@ def main():
     arg("--opt_level", default='O1', type=str)
     arg("--test_every", type=int, default=1)
     arg("--no_hardcore", action="store_true")
+    arg("--debug",type=int,default=0)
 
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-
+    if args.debug:
+        pdb.set_trace()
     #分布训练和设置gpuid：我选择单卡！
     if args.distributed:
         torch.cuda.set_device(args.local_rank)
@@ -136,6 +138,7 @@ def main():
     data_val = DeepFakeClassifierDataset(
         annotations=read_annotations(args.val_txt),
         mode="val",
+        balance=False,
         transforms=create_val_transforms(conf["size"]),
         normalize=conf.get("normalize", None))
 
@@ -179,10 +182,12 @@ def main():
         model = DistributedDataParallel(model, delay_allreduce=True,find_unused_parameters=True)
     else:
         model = DataParallel(model).cuda()
-    data_val.reset(1, args.seed)
+
+    data_val.reset_seed(1, args.seed)
+
     max_epochs = conf['optimizer']['schedule']['epochs']
     for epoch in range(start_epoch, max_epochs):
-        data_train.reset(epoch, args.seed)
+        data_train.reset_seed(epoch, args.seed)
         train_sampler = None
         if args.distributed:
             train_sampler = torch.utils.data.distributed.DistributedSampler(data_train)
@@ -209,7 +214,7 @@ def main():
             collate_fn=collate_function)
 
         train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train_data_loader, summary_writer, conf,
-                    args.local_rank)
+                    args.local_rank, args.debug)
         model = model.eval()
 
         if args.local_rank == 0:
@@ -234,8 +239,10 @@ def main():
 
 def validate(args, data_val, bce_best, model, snapshot_name, current_epoch, summary_writer,conf):
     print("Test phase")
+    if args.debug:
+        pdb.set_trace()
     model = model.eval()
-    probs, gt_labels, names = predict_set(model,data_val,{'run_type':'val'})
+    probs, gt_labels, names = predict_set(model,data_val,{'run_type':'val','debug':args.debug})
     matrix = evaluate(gt_labels, probs > conf['pos_th'], probs)
     bce = matrix['bce']
 
@@ -252,7 +259,7 @@ def validate(args, data_val, bce_best, model, snapshot_name, current_epoch, summ
                 }, args.output_dir + snapshot_name + "_best_dice")
             bce_best = bce
             with open("predictions_{}.json".format(args.fold), "w") as f:
-                json.dump({"probs": probs, "targets": gt_labels}, f)
+                json.dump({"probs": probs.tolist(), "targets": gt_labels.tolist()}, f)
 
         torch.save({
             'epoch': current_epoch + 1,
@@ -265,19 +272,25 @@ def validate(args, data_val, bce_best, model, snapshot_name, current_epoch, summ
 
 
 def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train_data_loader, summary_writer, conf,
-                local_rank):
+                local_rank, debug):
     #存储平均值
+    progbar = Progbar(len(train_data_loader.dataset), stateful_metrics=['epoch', 'config'])
+    batch_time = AverageMeter()
+    end = time.time()
     losses = AverageMeter()
     fake_losses = AverageMeter()
     real_losses = AverageMeter()
     max_iters = conf["batches_per_epoch"]
     print("training epoch {}".format(current_epoch))
     model.train()
-    pbar = tqdm(enumerate(train_data_loader), total=max_iters, desc="Epoch {}".format(current_epoch), ncols=0)
-    if conf["optimizer"]["schedule"]["mode"] == "epoch":
-        scheduler.step(current_epoch)
-    for i, (labels, imgs, img_path) in pbar:
-        imgs = imgs.cuda()
+    # pbar = tqdm(enumerate(train_data_loader), total=max_iters, desc="Epoch {}".format(current_epoch), ncols=0)
+
+    for i, (labels, imgs, img_path) in enumerate(train_data_loader):
+        optimizer.zero_grad()
+        imgs = imgs.reshape((-1,imgs.size(-3),imgs.size(-2), imgs.size(-1)))
+        imgs = Variable(imgs, requires_grad=True).cuda()
+
+        labels = labels.reshape(-1)
         labels = labels.cuda().float()
         out_labels = model(imgs)
 
@@ -288,9 +301,9 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
 
         ohem = conf.get("ohem_samples", None)
         if torch.sum(fake_idx * 1) > 0:
-            fake_loss = loss_function(out_labels[fake_idx], labels[fake_idx])
+            fake_loss = loss_function(out_labels[fake_idx].reshape(-1), labels[fake_idx])
         if torch.sum(real_idx * 1) > 0:
-            real_loss = loss_function(out_labels[real_idx], labels[real_idx])
+            real_loss = loss_function(out_labels[real_idx].reshape(-1), labels[real_idx])
         #挑选出最大的n个计算损失
         if ohem:
             fake_loss = topk(fake_loss, k=min(ohem, fake_loss.size(0)), sorted=False)[0].mean()
@@ -301,10 +314,10 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
         fake_losses.update(0 if fake_loss == 0 else fake_loss.item(), imgs.size(0))
         real_losses.update(0 if real_loss == 0 else real_loss.item(), imgs.size(0))
 
-        optimizer.zero_grad()
-        pbar.set_postfix({"lr": float(scheduler.get_lr()[-1]), "epoch": current_epoch, "loss": losses.avg,
-                          "fake_loss": fake_losses.avg, "real_loss": real_losses.avg})
 
+
+        # pbar.set_postfix({"lr": float(scheduler.get_lr()[-1]), "epoch": current_epoch, "loss": losses.avg,
+        #                   "fake_loss": fake_losses.avg, "real_loss": real_losses.avg})
         if conf['fp16']:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
@@ -313,11 +326,22 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
         torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 1)
         optimizer.step()
         torch.cuda.synchronize()
+
+        progbar.add(imgs.size(0), values=[('epoch', current_epoch),
+                                          ('loss', losses.avg),
+                                          ("lr",float(scheduler.get_lr()[-1])),
+                                          ("f",fake_losses.avg),
+                                          ("r",real_losses.avg)])
+        batch_time.update(time.time() - end)
+        end = time.time()
+
         if conf["optimizer"]["schedule"]["mode"] in ("step", "poly"):
             scheduler.step(i + current_epoch * max_iters)
-        if i == max_iters - 1:
+        if (i == max_iters - 1) or debug:
             break
-    pbar.close()
+
+    if conf["optimizer"]["schedule"]["mode"] == "epoch":
+        scheduler.step(current_epoch)
     if local_rank == 0:
         for idx, param_group in enumerate(optimizer.param_groups):
             lr = param_group['lr']

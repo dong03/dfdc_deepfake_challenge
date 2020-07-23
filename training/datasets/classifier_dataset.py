@@ -3,21 +3,27 @@ import os
 import random
 import sys
 import traceback
-
+import json
+import pdb
+import torch
 import cv2
 import numpy as np
-import pandas as pd
 import skimage.draw
-from albumentations import ImageCompression, OneOf, GaussianBlur, Blur
-from albumentations.augmentations.functional import image_compression, rot90
+from albumentations.augmentations.functional import rot90
 from albumentations.pytorch.functional import img_to_tensor
-from scipy.ndimage import binary_erosion, binary_dilation
+from scipy.ndimage import  binary_dilation
 from skimage import measure
 from torch.utils.data import Dataset
 import dlib
 
-from training.datasets.validation_set import PUBLIC_SET
+"""
+修改：
+去掉因diff_mask缺少导致的不能操作的mask
+概率：0.35去掉眼睛，0.175去嘴，0.0875去鼻子；0.2去半张脸，0.1是依据diff_mask操作
+现为：前四项各0.25
 
+原本只有padding 3（原始尺寸）  修改为random.randint(3,5),三种尺度
+"""
 
 def prepare_bit_masks(mask):
     h, w = mask.shape
@@ -53,12 +59,13 @@ predictor = dlib.shape_predictor('libs/shape_predictor_68_face_landmarks.dat')
 
 def blackout_convex_hull(img):
     try:
-        rect = detector(img)[0]
-        sp = predictor(img, rect)
+        out_img = img.copy()
+        rect = detector(out_img)[0]
+        sp = predictor(out_img, rect)
         landmarks = np.array([[p.x, p.y] for p in sp.parts()])
         outline = landmarks[[*range(17), *range(26, 16, -1)]]
         Y, X = skimage.draw.polygon(outline[:, 1], outline[:, 0])
-        cropped_img = np.zeros(img.shape[:2], dtype=np.uint8)
+        cropped_img = np.zeros(out_img.shape[:2], dtype=np.uint8)
         cropped_img[Y, X] = 1
         # if random.random() > 0.5:
         #     img[cropped_img == 0] = 0
@@ -68,6 +75,7 @@ def blackout_convex_hull(img):
         y, x = measure.centroid(cropped_img)
         y = int(y)
         x = int(x)
+
         first = random.random() > 0.5
         if random.random() > 0.5:
             if first:
@@ -80,9 +88,10 @@ def blackout_convex_hull(img):
             else:
                 cropped_img[:, x:] = 0
 
-        img[cropped_img > 0] = 0
+        out_img[cropped_img > 0] = 0
+        return out_img
     except Exception as e:
-        pass
+        return img
 
 
 def dist(p1, p2):
@@ -129,11 +138,11 @@ def remove_mouth(image, landmarks):
 
 
 def remove_landmark(image, landmarks):
-    if random.random() > 0.5:
+    if random.random() > 0.67:
         image = remove_eyes(image, landmarks)
-    elif random.random() > 0.5:
+    elif random.random() > 0.33:
         image = remove_mouth(image, landmarks)
-    elif random.random() > 0.5:
+    else:
         image = remove_nose(image, landmarks)
     return image
 
@@ -147,232 +156,112 @@ def change_padding(image, part=5):
     return image
 
 
-def blackout_random(image, mask, label):
-    binary_mask = mask > 0.4 * 255
-    h, w = binary_mask.shape[:2]
-
-    tries = 50
-    current_try = 1
-    while current_try < tries:
-        first = random.random() < 0.5
-        if random.random() < 0.5:
-            pivot = random.randint(h // 2 - h // 5, h // 2 + h // 5)
-            bitmap_msk = np.ones_like(binary_mask)
-            if first:
-                bitmap_msk[:pivot, :] = 0
-            else:
-                bitmap_msk[pivot:, :] = 0
-        else:
-            pivot = random.randint(w // 2 - w // 5, w // 2 + w // 5)
-            bitmap_msk = np.ones_like(binary_mask)
-            if first:
-                bitmap_msk[:, :pivot] = 0
-            else:
-                bitmap_msk[:, pivot:] = 0
-
-        if label < 0.5 and np.count_nonzero(image * np.expand_dims(bitmap_msk, axis=-1)) / 3 > (h * w) / 5 \
-                or np.count_nonzero(binary_mask * bitmap_msk) > 40:
-            mask *= bitmap_msk
-            image *= np.expand_dims(bitmap_msk, axis=-1)
-            break
-        current_try += 1
-    return image
-
-
-def blend_original(img):
-    img = img.copy()
-    h, w = img.shape[:2]
-    rect = detector(img)
-    if len(rect) == 0:
-        return img
-    else:
-        rect = rect[0]
-    sp = predictor(img, rect)
-    landmarks = np.array([[p.x, p.y] for p in sp.parts()])
-    outline = landmarks[[*range(17), *range(26, 16, -1)]]
-    Y, X = skimage.draw.polygon(outline[:, 1], outline[:, 0])
-    raw_mask = np.zeros(img.shape[:2], dtype=np.uint8)
-    raw_mask[Y, X] = 1
-    face = img * np.expand_dims(raw_mask, -1)
-
-    # add warping
-    h1 = random.randint(h - h // 2, h + h // 2)
-    w1 = random.randint(w - w // 2, w + w // 2)
-    while abs(h1 - h) < h // 3 and abs(w1 - w) < w // 3:
-        h1 = random.randint(h - h // 2, h + h // 2)
-        w1 = random.randint(w - w // 2, w + w // 2)
-    face = cv2.resize(face, (w1, h1), interpolation=random.choice([cv2.INTER_LINEAR, cv2.INTER_AREA, cv2.INTER_CUBIC]))
-    face = cv2.resize(face, (w, h), interpolation=random.choice([cv2.INTER_LINEAR, cv2.INTER_AREA, cv2.INTER_CUBIC]))
-
-    raw_mask = binary_erosion(raw_mask, iterations=random.randint(4, 10))
-    img[raw_mask, :] = face[raw_mask, :]
-    if random.random() < 0.2:
-        img = OneOf([GaussianBlur(), Blur()], p=0.5)(image=img)["image"]
-    # image compression
-    if random.random() < 0.5:
-        img = ImageCompression(quality_lower=40, quality_upper=95)(image=img)["image"]
-    return img
-
-
 class DeepFakeClassifierDataset(Dataset):
 
     def __init__(self,
-                 data_path="/mnt/sota/datasets/deepfake",
-                 fold=0,
+                 annotations,
                  label_smoothing=0.01,
-                 padding_part=3,
                  hardcore=True,
-                 crops_dir="crops",
-                 folds_csv="folds.csv",
                  normalize={"mean": [0.485, 0.456, 0.406],
                             "std": [0.229, 0.224, 0.225]},
                  rotation=False,
                  mode="train",
-                 reduce_val=True,
-                 oversample_real=True,
+                 balance=True,
                  transforms=None
                  ):
         super().__init__()
-        self.data_root = data_path
-        self.fold = fold
-        self.folds_csv = folds_csv
         self.mode = mode
         self.rotation = rotation
-        self.padding_part = padding_part
+        self.padding_part = random.randint(3,5)
         self.hardcore = hardcore
-        self.crops_dir = crops_dir
         self.label_smoothing = label_smoothing
         self.normalize = normalize
         self.transforms = transforms
-        self.df = pd.read_csv(self.folds_csv)
-        self.oversample_real = oversample_real
-        self.reduce_val = reduce_val
+        self.balance = balance
+        if self.balance:
+            self.data = [[x for x in annotations if x[1] == lab] for lab in [0,1]]
+            print("neg: %d |pos: %d"%(len(self.data[0]),len(self.data[1])))
+        else:
+            self.data = [annotations]
+            print("all: %d"%len(self.data[0]))
+    def load_sample(self,img_path):
+        try:
+            image = cv2.imread(img_path, cv2.IMREAD_COLOR)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            if self.mode == "train" and self.hardcore and not self.rotation:
+                landmark_path = img_path.split('.')[0] + '.json'
+                # 0.7的概率随机去除landmarks，done
+                if os.path.exists(landmark_path) and random.random() < 0.75:
+                    landmarks = self.parse_json(landmark_path)
+                    image = remove_landmark(image, landmarks)
+                # 0.2的概率去除整张脸
+                elif random.random() < 0.25:
+                    image = blackout_convex_hull(image)
+
+            # 裁剪掉人脸周围的空白
+            if self.mode == "train" and self.padding_part > 3:
+                image = change_padding(image, self.padding_part)
+            rotation = 0
+            if self.transforms:
+                data = self.transforms(image=image)
+                image = data["image"]
+
+            if self.mode == "train" and self.rotation:
+                rotation = random.randint(0, 3)
+                image = rot90(image, rotation)
+
+            image = img_to_tensor(image, self.normalize)
+            return image, rotation
+        except:
+            pdb.set_trace()
 
     def __getitem__(self, index: int):
+        if self.balance:
 
-        while True:
-            video, img_file, label, ori_video, frame, fold = self.data[index]
-            try:
-                if self.mode == "train":
-                    label = np.clip(label, self.label_smoothing, 1 - self.label_smoothing)
-                img_path = os.path.join(self.data_root, self.crops_dir, video, img_file)
-                image = cv2.imread(img_path, cv2.IMREAD_COLOR)
-                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                mask = np.zeros(image.shape[:2], dtype=np.uint8)
-                diff_path = os.path.join(self.data_root, "diffs", video, img_file[:-4] + "_diff.png")
-                try:
-                    msk = cv2.imread(diff_path, cv2.IMREAD_GRAYSCALE)
-                    if msk is not None:
-                        mask = msk
-                except:
-                    print("not found mask", diff_path)
-                    pass
-                if self.mode == "train" and self.hardcore and not self.rotation:
-                    landmark_path = os.path.join(self.data_root, "landmarks", ori_video, img_file[:-4] + ".npy")
-                    if os.path.exists(landmark_path) and random.random() < 0.7:
-                        landmarks = np.load(landmark_path)
-                        image = remove_landmark(image, landmarks)
-                    elif random.random() < 0.2:
-                        blackout_convex_hull(image)
-                    elif random.random() < 0.1:
-                        binary_mask = mask > 0.4 * 255
-                        masks = prepare_bit_masks((binary_mask * 1).astype(np.uint8))
-                        tries = 6
-                        current_try = 1
-                        while current_try < tries:
-                            bitmap_msk = random.choice(masks)
-                            if label < 0.5 or np.count_nonzero(mask * bitmap_msk) > 20:
-                                mask *= bitmap_msk
-                                image *= np.expand_dims(bitmap_msk, axis=-1)
-                                break
-                            current_try += 1
-                if self.mode == "train" and self.padding_part > 3:
-                    image = change_padding(image, self.padding_part)
-                valid_label = np.count_nonzero(mask[mask > 20]) > 32 or label < 0.5
-                valid_label = 1 if valid_label else 0
-                rotation = 0
-                if self.transforms:
-                    data = self.transforms(image=image, mask=mask)
-                    image = data["image"]
-                    mask = data["mask"]
-                if self.mode == "train" and self.hardcore and self.rotation:
-                    # landmark_path = os.path.join(self.data_root, "landmarks", ori_video, img_file[:-4] + ".npy")
-                    dropout = 0.8 if label > 0.5 else 0.6
-                    if self.rotation:
-                        dropout *= 0.7
-                    elif random.random() < dropout:
-                        blackout_random(image, mask, label)
+            safe_idx = index % len(self.data[0])
+            img_path_neg = self.data[0][safe_idx][0]
+            img_neg,rotation_neg = self.load_sample(img_path_neg)
+            lab_neg = self.data[0][safe_idx][1]
+            if self.mode == "train":
+                lab_neg = np.clip(lab_neg, self.label_smoothing, 1 - self.label_smoothing)
 
-                #
-                # os.makedirs("../images", exist_ok=True)
-                # cv2.imwrite(os.path.join("../images", video+ "_" + str(1 if label > 0.5 else 0) + "_"+img_file), image[...,::-1])
+            safe_idx = index % len(self.data[1])
+            img_path_pos = self.data[1][safe_idx][0]
+            img_pos,rotation_pos = self.load_sample(img_path_pos)
+            lab_pos = self.data[1][safe_idx][1]
+            if self.mode == "train":
+                lab_pos = np.clip(lab_pos, self.label_smoothing, 1 - self.label_smoothing)
+            return torch.tensor([lab_neg, lab_pos]), torch.cat((img_neg.unsqueeze(0), img_pos.unsqueeze(0))), \
+                   [img_path_neg, img_path_pos]
 
-                if self.mode == "train" and self.rotation:
-                    rotation = random.randint(0, 3)
-                    image = rot90(image, rotation)
-
-                image = img_to_tensor(image, self.normalize)
-                return {"image": image, "labels": np.array((label,)), "img_name": os.path.join(video, img_file),
-                        "valid": valid_label, "rotations": rotation}
-            except Exception as e:
-                traceback.print_exc(file=sys.stdout)
-                print("Broken image", os.path.join(self.data_root, self.crops_dir, video, img_file))
-                index = random.randint(0, len(self.data) - 1)
-
-    def random_blackout_landmark(self, image, mask, landmarks):
-        x, y = random.choice(landmarks)
-        first = random.random() > 0.5
-        #  crop half face either vertically or horizontally
-        if random.random() > 0.5:
-            # width
-            if first:
-                image[:, :x] = 0
-                mask[:, :x] = 0
-            else:
-                image[:, x:] = 0
-                mask[:, x:] = 0
         else:
-            # height
-            if first:
-                image[:y, :] = 0
-                mask[:y, :] = 0
-            else:
-                image[y:, :] = 0
-                mask[y:, :] = 0
-
-    def reset(self, epoch, seed):
-        self.data = self._prepare_data(epoch, seed)
+            lab = self.data[0][index][1]
+            img_path = self.data[0][index][0]
+            img, rotation = self.load_sample(img_path)
+            lab = torch.tensor(lab,dtype=torch.long)
+            return lab, img, img_path#, rotation
 
     def __len__(self) -> int:
-        return len(self.data)
+        return max([len(subset) for subset in self.data])
 
-    def _prepare_data(self, epoch, seed):
-        df = self.df
-        if self.mode == "train":
-            rows = df[df["fold"] != self.fold]
-        else:
-            rows = df[df["fold"] == self.fold]
+    def parse_json(self,json_path):
+        with open(json_path, 'r') as f:
+            data = json.load(f)
+        y1, x1, y2, x2 = data['coordinates']
+        landmarks = [(data['landmarks'][i] - x1, data['landmarks'][i + 1] - y1) for i in range(0, 10, 2)]
+        return landmarks
+
+    def reset_seed(self,epoch,seed):
         seed = (epoch + 1) * seed
-        if self.oversample_real:
-            rows = self._oversample(rows, seed)
-        if self.mode == "val" and self.reduce_val:
-            # every 2nd frame, to speed up validation
-            rows = rows[rows["frame"] % 20 == 0]
-            # another option is to use public validation set
-            #rows = rows[rows["video"].isin(PUBLIC_SET)]
-
-        print(
-            "real {} fakes {} mode {}".format(len(rows[rows["label"] == 0]), len(rows[rows["label"] == 1]), self.mode))
-        data = rows.values
-
+        random.seed(seed)
         np.random.seed(seed)
-        np.random.shuffle(data)
-        return data
+        torch.manual_seed(seed)  # cpu
+        torch.cuda.manual_seed_all(seed)  # gpu
+        torch.backends.cudnn.deterministic = True
 
-    def _oversample(self, rows: pd.DataFrame, seed):
-        real = rows[rows["label"] == 0]
-        fakes = rows[rows["label"] == 1]
-        num_real = real["video"].count()
-        if self.mode == "train":
-            fakes = fakes.sample(n=num_real, replace=False, random_state=seed)
-        return pd.concat([real, fakes])
+def collate_function(data):
+    transposed_data = list(zip(*data))
+    lab, img, img_path = transposed_data[0], transposed_data[1], transposed_data[2]
+    img = torch.stack(img, 0)
+    lab = torch.stack(lab, 0)
+    return lab, img, img_path
