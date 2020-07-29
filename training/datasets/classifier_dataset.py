@@ -148,13 +148,13 @@ def remove_landmark(image, landmarks):
 
 
 def change_padding(image, part=5):
-    h, w = image.shape[:2]
+    out = image.copy()
+    h, w = out.shape[:2]
     # original padding was done with 1/3 from each side, too much
     pad_h = int(((3 / 5) * h) / part)
     pad_w = int(((3 / 5) * w) / part)
-    image = image[h // 5 - pad_h:-h // 5 + pad_h, w // 5 - pad_w:-w // 5 + pad_w]
-    return image
-
+    out = out[h // 5 - pad_h:-h // 5 + pad_h, w // 5 - pad_w:-w // 5 + pad_w]
+    return out
 
 class DeepFakeClassifierDataset(Dataset):
 

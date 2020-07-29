@@ -147,10 +147,10 @@ def read_annotations(data_path):
         data.append((sample_path, label))
     return data
 
-def predict_set(net, dataloader, runtime_params):
+def predict_set(nets, dataloader, runtime_params):
 
     run_type = runtime_params['run_type']
-    net = net.eval()
+    #net = net.eval()
     progbar = Progbar(len(dataloader.dataset), stateful_metrics=['run-type'])
     batch_time = AverageMeter()
     names = []
@@ -160,12 +160,20 @@ def predict_set(net, dataloader, runtime_params):
         for i, (labels, imgs, img_paths) in enumerate(dataloader):
             s_time = time.time()
             imgs = imgs.cuda()
-            names.extend(img_paths)
-            output = net(imgs)
-            output = torch.sigmoid(output).cpu().numpy().reshape(-1)
 
+            names.extend(img_paths)
+            temp = []
+            for net in nets:
+                if 'half' in runtime_params.values():
+                    output = net(imgs.half())
+                else:
+                    output = net(imgs)
+                output = torch.sigmoid(output).cpu().numpy().reshape(-1)
+                temp.append(output)
+            output = np.mean(temp, axis=0).reshape(-1)
             probs = np.concatenate((probs,output),axis=0)
             gt_labels = np.concatenate((gt_labels,labels.data.numpy().reshape(-1)),axis=0)
+            assert gt_labels.shape == probs.shape
 
             progbar.add(imgs.size(0), values=[('run-type', run_type)])  # ,('batch_time', batch_time.val)])
             batch_time.update(time.time() - s_time)

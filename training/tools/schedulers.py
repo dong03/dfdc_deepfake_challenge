@@ -16,14 +16,16 @@ class LRStepScheduler(_LRScheduler):
 class PolyLR(_LRScheduler):
     """Sets the learning rate of each parameter group according to poly learning rate policy
     """
-    def __init__(self, optimizer, max_iter=90000, power=0.9, last_epoch=-1):
+    def __init__(self, optimizer, max_iter=90000, power=0.9, last_epoch=-1,cycle=False):
         self.max_iter = max_iter
         self.power = power
+        self.cycle = cycle
         super(PolyLR, self).__init__(optimizer, last_epoch)
 
     def get_lr(self):
-        self.last_epoch = (self.last_epoch + 1) % self.max_iter
-        return [base_lr * ((1 - float(self.last_epoch) / self.max_iter) ** (self.power)) for base_lr in self.base_lrs]
+        self.last_epoch_div = (self.last_epoch + 1) % self.max_iter
+        scale = (self.last_epoch + 1) // self.max_iter + 1.0 if self.cycle else 1
+        return [(base_lr * ((1 - float(self.last_epoch_div) / self.max_iter) ** (self.power))) / scale for base_lr in self.base_lrs]
 
 class ExponentialLRScheduler(_LRScheduler):
     """Decays the learning rate of each parameter group by gamma every epoch.
