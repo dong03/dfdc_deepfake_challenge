@@ -74,8 +74,8 @@ def main():
     parser = argparse.ArgumentParser("PyTorch Xview Pipeline")
     arg = parser.add_argument
     arg('--config', metavar='CONFIG_FILE',default='configs/b7.json',help='path to configuration file')
-    arg('--train_txt',type=str,default='/data/dongchengbo/VisualSearch/dfdc_dfv2_ff++_timit_withface_train.txt')
-    arg('--val_txt', type=str,default='/data/dongchengbo/VisualSearch/dfdc_dfv2_ff++_timit_withface_val.txt')
+    arg('--train_txt',type=str,default='/data/lvyb/data/pub_test/train_val_test/dfdc_dfv2_ff++_timit/train.txt')
+    arg('--val_txt', type=str,default='/data/lvyb/data/pub_test/train_val_test/dfdc_dfv2_ff++_timit/val.txt')
     arg('--workers', type=int, default=6, help='number of cpu threads to use')
     arg('--gpu', type=str, default='0', help='List of GPUs for parallel training, e.g. 0,1,2,3')
     arg('--output_dir', type=str, default='weights/')
@@ -212,7 +212,7 @@ def main():
             pin_memory=False,
             drop_last=True,
             collate_fn=collate_function)
-
+        print(len(train_data_loader.dataset))
         train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train_data_loader, summary_writer, conf,
                     args.local_rank, args.debug)
         model = model.eval()
@@ -242,7 +242,7 @@ def validate(args, data_val, bce_best, model, snapshot_name, current_epoch, summ
     if args.debug:
         pdb.set_trace()
     model = model.eval()
-    probs, gt_labels, names = predict_set(model,data_val,{'run_type':'val','debug':args.debug})
+    probs, gt_labels, names = predict_set([model],data_val,{'run_type':'val','debug':args.debug})
     matrix = evaluate(gt_labels, probs > conf['pos_th'], probs)
     bce = matrix['bce']
 
@@ -280,13 +280,14 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
     losses = AverageMeter()
     fake_losses = AverageMeter()
     real_losses = AverageMeter()
-    max_iters = conf["batches_per_epoch"]
+    max_iters = len(train_data_loader.dataset)#conf["batches_per_epoch"]
     print("training epoch {}".format(current_epoch))
     model.train()
     # pbar = tqdm(enumerate(train_data_loader), total=max_iters, desc="Epoch {}".format(current_epoch), ncols=0)
 
     for i, (labels, imgs, img_path) in enumerate(train_data_loader):
         optimizer.zero_grad()
+        numm = imgs.shape[0]
         imgs = imgs.reshape((-1,imgs.size(-3),imgs.size(-2), imgs.size(-1)))
         imgs = Variable(imgs, requires_grad=True).cuda()
 
@@ -313,7 +314,7 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
         losses.update(loss.item(), imgs.size(0))
         fake_losses.update(0 if fake_loss == 0 else fake_loss.item(), imgs.size(0))
         real_losses.update(0 if real_loss == 0 else real_loss.item(), imgs.size(0))
-
+        summary_writer.add_scalar('train/loss', loss.item(), global_step=i + current_epoch * max_iters)
 
 
         # pbar.set_postfix({"lr": float(scheduler.get_lr()[-1]), "epoch": current_epoch, "loss": losses.avg,
@@ -327,7 +328,7 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
         optimizer.step()
         torch.cuda.synchronize()
 
-        progbar.add(imgs.size(0), values=[('epoch', current_epoch),
+        progbar.add(numm, values=[('epoch', current_epoch),
                                           ('loss', losses.avg),
                                           ("lr",float(scheduler.get_lr()[-1])),
                                           ("f",fake_losses.avg),
@@ -346,7 +347,7 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
         for idx, param_group in enumerate(optimizer.param_groups):
             lr = param_group['lr']
             summary_writer.add_scalar('group{}/lr'.format(idx), float(lr), global_step=current_epoch)
-        summary_writer.add_scalar('train/loss', float(losses.avg), global_step=current_epoch)
+        #summary_writer.add_scalar('train/loss', float(losses.avg), global_step=current_epoch)
 
 
 if __name__ == '__main__':
