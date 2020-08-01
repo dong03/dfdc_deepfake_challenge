@@ -138,6 +138,7 @@ def remove_mouth(image, landmarks):
 
 
 def remove_landmark(image, landmarks):
+    #landmarks[left_eye_x,left_eye_y,right_eye_x,right_eye_y,
     if random.random() > 0.67:
         image = remove_eyes(image, landmarks)
     elif random.random() > 0.33:

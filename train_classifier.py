@@ -130,7 +130,7 @@ def main():
         annotations=read_annotations(args.train_txt),
         mode="train",
         balance=True,
-        hardcore=not args.no_hardcore,
+        hardcore=True,#not args.no_hardcore,
         label_smoothing=args.label_smoothing,
         transforms=create_train_transforms(conf["size"]),
         normalize=conf.get("normalize", None))
@@ -328,11 +328,7 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
         optimizer.step()
         torch.cuda.synchronize()
 
-        progbar.add(numm, values=[('epoch', current_epoch),
-                                          ('loss', losses.avg),
-                                          ("lr",float(scheduler.get_lr()[-1])),
-                                          ("f",fake_losses.avg),
-                                          ("r",real_losses.avg)])
+
         batch_time.update(time.time() - end)
         end = time.time()
 
@@ -340,6 +336,11 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
             scheduler.step(i + current_epoch * max_iters)
         if (i == max_iters - 1) or debug:
             break
+        progbar.add(numm, values=[('epoch', current_epoch),
+                                          ('loss', losses.avg),
+                                          ("lr",float(scheduler.get_lr()[-1])),
+                                          ("f",fake_losses.avg),
+                                          ("r",real_losses.avg)])
 
     if conf["optimizer"]["schedule"]["mode"] == "epoch":
         scheduler.step(current_epoch)
