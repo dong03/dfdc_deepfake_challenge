@@ -4,9 +4,14 @@ import json
 import os
 import pdb
 import time
-
-from torch import topk
 import cv2
+
+import torch
+from torch.backends import cudnn
+from torch.nn import DataParallel
+from torch.utils.data import DataLoader
+import torch.distributed as dist
+from torch import topk
 from torch.autograd import Variable
 from training.datasets.classifier_dataset import DeepFakeClassifierDataset, collate_function
 from torch.nn.modules.loss import BCEWithLogitsLoss
@@ -14,35 +19,21 @@ from training.tools.config import load_config
 from training.tools.utils import create_optimizer, AverageMeter, read_annotations, Progbar, predict_set, evaluate
 from training.transforms.albu import IsotropicResize
 from training.zoo import classifiers
-import warnings
-warnings.filterwarnings("ignore")
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-os.environ["OMP_NUM_THREADS"] = "1"
-
-
-
-cv2.ocl.setUseOpenCL(False)
-cv2.setNumThreads(0)
-import numpy as np
+from apex import amp
 from albumentations import Compose, RandomBrightnessContrast, \
     HorizontalFlip, FancyPCA, HueSaturationValue, OneOf, ToGray, \
     ShiftScaleRotate, ImageCompression, PadIfNeeded, GaussNoise, GaussianBlur
-
 from apex.parallel import DistributedDataParallel, convert_syncbn_model
 from tensorboardX import SummaryWriter
+import warnings
+warnings.filterwarnings("ignore")
 
-from apex import amp
-
-import torch
-from torch.backends import cudnn
-from torch.nn import DataParallel
-from torch.utils.data import DataLoader
-from tqdm import tqdm
-import torch.distributed as dist
-
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+cv2.ocl.setUseOpenCL(False)
+cv2.setNumThreads(0)
 torch.backends.cudnn.benchmark = True
-
 
 def create_train_transforms(size=300):
     return Compose([
@@ -274,7 +265,7 @@ def validate(args, data_val, bce_best, model, snapshot_name, current_epoch, summ
 def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train_data_loader, summary_writer, conf,
                 local_rank, debug):
     #存储平均值
-    progbar = Progbar(len(train_data_loader.dataset), stateful_metrics=['epoch', 'config'])
+    progbar = Progbar(len(train_data_loader.dataset), stateful_metrics=['epoch', 'config','lr'])
     batch_time = AverageMeter()
     end = time.time()
     losses = AverageMeter()
@@ -283,7 +274,6 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
     max_iters = len(train_data_loader.dataset)#conf["batches_per_epoch"]
     print("training epoch {}".format(current_epoch))
     model.train()
-    # pbar = tqdm(enumerate(train_data_loader), total=max_iters, desc="Epoch {}".format(current_epoch), ncols=0)
 
     for i, (labels, imgs, img_path) in enumerate(train_data_loader):
         optimizer.zero_grad()
@@ -315,10 +305,8 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
         fake_losses.update(0 if fake_loss == 0 else fake_loss.item(), imgs.size(0))
         real_losses.update(0 if real_loss == 0 else real_loss.item(), imgs.size(0))
         summary_writer.add_scalar('train/loss', loss.item(), global_step=i + current_epoch * max_iters)
+        summary_writer.add_scalar('train/lr',float(scheduler.get_lr()[-1]), global_step=i + current_epoch * max_iters)
 
-
-        # pbar.set_postfix({"lr": float(scheduler.get_lr()[-1]), "epoch": current_epoch, "loss": losses.avg,
-        #                   "fake_loss": fake_losses.avg, "real_loss": real_losses.avg})
         if conf['fp16']:
             with amp.scale_loss(loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
@@ -327,7 +315,6 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
         torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), 1)
         optimizer.step()
         torch.cuda.synchronize()
-
 
         batch_time.update(time.time() - end)
         end = time.time()

@@ -3,6 +3,7 @@ import os
 import re
 import time
 import pdb
+import json
 from torch.utils.data import Dataset, DataLoader
 import torch
 import cv2
@@ -47,7 +48,7 @@ if __name__ == '__main__':
 
     cudnn.benchmark = True
 
-    models = []
+    modelss = []
     model_paths = [os.path.join(args.weights_dir, model) for model in args.models]
     for path in model_paths:
         model = DeepFakeClassifier(encoder="tf_efficientnet_b7_ns")
@@ -58,18 +59,19 @@ if __name__ == '__main__':
         model.eval()
         model.cuda()
         del checkpoint
-        models.append(model.half())
+        modelss.append([model.half()])
     print("load models finish")
-    test_dirs = [
-        '/data/dongchengbo/VisualSearch/TIMI/TIMI_test/annotations/TIMI_test.txt',
-        '/data/dongchengbo/VisualSearch/meso-net/meso-net_val.txt',
-        '/data/dongchengbo/VisualSearch/wza_mini/wza_mini.txt',
-        '/data/lixirong/face_tamper_detection/train_test_datasets/DFDC/DFDCdev_lyb/test_imgs_with_label.txt',
-        '/data/dongchengbo/VisualSearch/dfdc_dfv2_ff++_timit_withface_val.txt']
+    # test_dirs = [
+    #     '/data/dongchengbo/VisualSearch/TIMI/TIMI_test/annotations/TIMI_test.txt',
+    #     '/data/dongchengbo/VisualSearch/meso-net/meso-net_val.txt',
+    #     '/data/dongchengbo/VisualSearch/wza_mini/wza_mini.txt',
+    #     '/data/lixirong/face_tamper_detection/train_test_datasets/DFDC/DFDCdev_lyb/test_imgs_with_label.txt',
+    #     '/data/dongchengbo/VisualSearch/dfdc_dfv2_ff++_timit_withface_val.txt']
+    test_dirs = ['/data/dongchengbo/VisualSearch/ffbenchmark.txt']
     data_name = [os.path.basename(each).split('.')[0] for each in test_dirs]
 
 
-    for each in list(zip(test_dirs, data_name))[-2:]:
+    for each in list(zip(test_dirs, data_name)):
 
         print("begin to pred %s" % each[1])
         annotations = read_annotations(each[0])
@@ -91,16 +93,36 @@ if __name__ == '__main__':
             drop_last=False,
             collate_fn=collate_function
         )
+        probs_avg = []
+        for (index,models) in enumerate(modelss):
+            probs, gt_labels, names = predict_set(models,test_loader,{'run_type':'test','debug':0,'data_type':'half'})
 
-        probs, gt_labels, names = predict_set(models,test_loader,{'run_type':'test','debug':0,'data_type':'half'})
-        
-        probs = probs.reshape((-1, 1))
-        gt_labels = gt_labels.reshape(-1)
-        probs_2 = np.hstack([1 - probs, probs])
-        # pdb.set_trace()
-        metrix = evaluate(gt_labels, probs > 0.5, probs)
-        print("model: %s\ndata: %s"%(os.path.basename(model_paths[0]),each[1]))
-        print(metrix)
-        np.save('results/%s_%s_label' % (os.path.basename(model_paths[0]),each[1]), gt_labels)
-        np.save('results/%s_%s_score' % (os.path.basename(model_paths[0]),each[1]), probs)
-        print('\n')
+            # probs = probs.reshape((-1, 1))
+            # gt_labels = gt_labels.reshape(-1)
+            # probs_2 = np.hstack([1 - probs, probs])
+            # # pdb.set_trace()
+            # metrix = evaluate(gt_labels, probs > 0.5, probs)
+            # print("model: %s\ndata: %s"%(os.path.basename(model_paths[0]),each[1]))
+            # print(metrix)
+            # np.save('results/%s_%s_label' % (os.path.basename(model_paths[0]),each[1]), gt_labels)
+            # np.save('results/%s_%s_score' % (os.path.basename(model_paths[0]),each[1]), probs)
+            # print('\n')
+
+            probs = probs.reshape(-1)
+            probs_avg.append(probs)
+            results = {}
+            label = ['real','fake']
+            for i in range(len(names)):
+                results[os.path.split(names[i])[-1]] = label[probs[i]>0.5]
+
+            with open('submision/%s.json'%(os.path.basename(model_paths[index])), "w", encoding='utf8') as f:
+                json.dump(results, f, ensure_ascii=False, indent=4)
+        #pdb.set_trace()
+        probs_avg = np.array(probs_avg)
+        np.save('submision/merge',probs_avg)
+        probs_avg = np.mean(probs_avg,axis=0)
+        results = {}
+        for i in range(len(names)):
+            results[os.path.split(names[i])[-1]] = label[probs[i] > 0.5]
+        with open('submision/merge.json', "w", encoding='utf8') as f:
+            json.dump(results, f, ensure_ascii=False, indent=4)
