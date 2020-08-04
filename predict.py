@@ -4,35 +4,26 @@ import re
 import time
 import pdb
 import json
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 import torch
 import cv2
 from training.zoo.classifiers import DeepFakeClassifier
 from torch.backends import cudnn
 from training.datasets.classifier_dataset import DeepFakeClassifierDataset, collate_function
 
-from training.tools.utils import AverageMeter, read_annotations, Progbar, predict_set, evaluate
-from training.transforms.albu import IsotropicResize
-
+from training.tools.utils import  read_annotations, predict_set
+from training.transforms.albu import create_val_transforms
+import numpy as np
 import warnings
 warnings.filterwarnings("ignore")
+
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 
 torch.backends.cudnn.benchmark = True
-
 cv2.ocl.setUseOpenCL(False)
 cv2.setNumThreads(0)
-import numpy as np
-from albumentations import Compose, PadIfNeeded
-
-
-def create_val_transforms(size=300):
-    return Compose([
-        IsotropicResize(max_side=size, interpolation_down=cv2.INTER_AREA, interpolation_up=cv2.INTER_CUBIC),
-        PadIfNeeded(min_height=size, min_width=size, border_mode=cv2.BORDER_CONSTANT),
-    ])
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("Predict test videos")

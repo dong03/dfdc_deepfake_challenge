@@ -17,12 +17,10 @@ from training.datasets.classifier_dataset import DeepFakeClassifierDataset, coll
 from torch.nn.modules.loss import BCEWithLogitsLoss
 from training.tools.config import load_config
 from training.tools.utils import create_optimizer, AverageMeter, read_annotations, Progbar, predict_set, evaluate
-from training.transforms.albu import IsotropicResize
+from training.transforms.albu import create_train_transforms,create_val_transforms
 from training.zoo import classifiers
 from apex import amp
-from albumentations import Compose, RandomBrightnessContrast, \
-    HorizontalFlip, FancyPCA, HueSaturationValue, OneOf, ToGray, \
-    ShiftScaleRotate, ImageCompression, PadIfNeeded, GaussNoise, GaussianBlur
+
 from apex.parallel import DistributedDataParallel, convert_syncbn_model
 from tensorboardX import SummaryWriter
 import warnings
@@ -34,32 +32,6 @@ os.environ["OMP_NUM_THREADS"] = "1"
 cv2.ocl.setUseOpenCL(False)
 cv2.setNumThreads(0)
 torch.backends.cudnn.benchmark = True
-
-def create_train_transforms(size=300):
-    return Compose([
-        ImageCompression(quality_lower=60, quality_upper=100, p=0.5),
-        GaussNoise(p=0.1),
-        GaussianBlur(blur_limit=3, p=0.05),
-        HorizontalFlip(),
-        OneOf([
-            IsotropicResize(max_side=size, interpolation_down=cv2.INTER_AREA, interpolation_up=cv2.INTER_CUBIC),
-            IsotropicResize(max_side=size, interpolation_down=cv2.INTER_AREA, interpolation_up=cv2.INTER_LINEAR),
-            IsotropicResize(max_side=size, interpolation_down=cv2.INTER_LINEAR, interpolation_up=cv2.INTER_LINEAR),
-        ], p=1),
-        PadIfNeeded(min_height=size, min_width=size, border_mode=cv2.BORDER_CONSTANT),
-        OneOf([RandomBrightnessContrast(), FancyPCA(), HueSaturationValue()], p=0.7),
-        ToGray(p=0.2),
-        ShiftScaleRotate(shift_limit=0.1, scale_limit=0.2, rotate_limit=10, border_mode=cv2.BORDER_CONSTANT, p=0.5),
-    ]
-    )
-
-
-def create_val_transforms(size=300):
-    return Compose([
-        IsotropicResize(max_side=size, interpolation_down=cv2.INTER_AREA, interpolation_up=cv2.INTER_CUBIC),
-        PadIfNeeded(min_height=size, min_width=size, border_mode=cv2.BORDER_CONSTANT),
-    ])
-
 
 def main():
     parser = argparse.ArgumentParser("PyTorch Xview Pipeline")
@@ -271,13 +243,13 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
     losses = AverageMeter()
     fake_losses = AverageMeter()
     real_losses = AverageMeter()
-    max_iters = len(train_data_loader.dataset)#conf["batches_per_epoch"]
+    max_iters = conf["batches_per_epoch"]
     print("training epoch {}".format(current_epoch))
     model.train()
 
     for i, (labels, imgs, img_path) in enumerate(train_data_loader):
-        optimizer.zero_grad()
         numm = imgs.shape[0]
+        optimizer.zero_grad()
         imgs = imgs.reshape((-1,imgs.size(-3),imgs.size(-2), imgs.size(-1)))
         imgs = Variable(imgs, requires_grad=True).cuda()
 
@@ -329,6 +301,7 @@ def train_epoch(current_epoch, loss_function, model, optimizer, scheduler, train
                                           ("f",fake_losses.avg),
                                           ("r",real_losses.avg)])
 
+    pdb.set_trace()
     if conf["optimizer"]["schedule"]["mode"] == "epoch":
         scheduler.step(current_epoch)
     if local_rank == 0:

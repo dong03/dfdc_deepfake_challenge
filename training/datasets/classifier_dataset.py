@@ -185,6 +185,7 @@ class DeepFakeClassifierDataset(Dataset):
         else:
             self.data = [annotations]
             print("all: %d"%len(self.data[0]))
+        self.lost = []
     def load_sample(self,img_path):
         try:
             image = cv2.imread(img_path, cv2.IMREAD_COLOR)
@@ -214,7 +215,9 @@ class DeepFakeClassifierDataset(Dataset):
             image = img_to_tensor(image, self.normalize)
             return image, rotation
         except:
-            pdb.set_trace()
+            self.lost.append(img_path)
+            return torch.randn((3,380,380)),0
+            #pdb.set_trace()
 
     def __getitem__(self, index: int):
         if self.balance:
